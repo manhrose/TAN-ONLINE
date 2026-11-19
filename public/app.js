@@ -10,8 +10,8 @@ function render(){
  $("waiting").innerHTML=S.players.map(p=>`<span class="person">${esc(p.name)}${p.id===S.host?" ★":""}</span>`).join(" ");
  $("start").hidden=S.phase!=="lobby"||socket.id!==S.host;
  if(S.phase==="lobby")return;
- $("deck").innerHTML=`<span>${S.deck}</span>`;$("trump").innerHTML="";$("trump").appendChild(makeCard(S.trump));
- $("players").innerHTML=S.players.filter(p=>!p.me).map(p=>`<div class="person"><b>${esc(p.name)}</b><br>${p.count} lá${p.defender?" • ĐANG ĐỠ":""}${p.attacker?" • ĐANG TẤN":""}${p.passed?" • ĐÃ KẾT THÚC":""}</div>`).join("");
+ $("deck").innerHTML=`<span>${S.deck}</span>`;$("trump").innerHTML="";$("trump").appendChild(makeCard(S.trump));if(!S.trumpAvailable){let tag=document.createElement("small");tag.textContent="ĐÃ BỐC";$("trump").appendChild(tag);}
+ $("players").innerHTML=S.players.filter(p=>!p.me).map(p=>`<div class="person"><b>${esc(p.name)}</b><br>${p.finished?" • ĐÃ VỀ #"+p.place:p.count+" lá"}${p.defender?" • ĐANG ĐỠ":""}${p.attacker?" • ĐANG TẤN":""}${p.passed?" • ĐÃ KẾT THÚC":""}</div>`).join("");
  $("status").textContent=S.message+(S.phase==="finished"?" • "+S.winner+" là người cuối cùng còn bài.":"");
  $("battle").innerHTML="";
  S.table.forEach(t=>{let pair=document.createElement("div");pair.className="pair";let c=makeCard(t.card,S.canDefend&&!t.cover?()=>{target=t.card.id;render()}:null,target===t.card.id);
