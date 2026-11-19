@@ -8,12 +8,12 @@ const get=(r,pid)=>r.players.find(p=>p.id===pid);
 const rank=c=>RANKS.indexOf(c.rank);
 function state(r,pid){
  const me=get(r,pid);
- return {code:r.code,phase:r.phase,host:r.host,players:r.players.map(p=>({id:p.id,name:p.name,count:p.hand.length,me:p.id===pid,defender:p.id===r.defender,attacker:p.id===r.attacker,passed:r.passed.has(p.id),connected:p.connected!==false})),
- hand:me?me.hand:[],trump:r.trump,deck:r.deck.length,table:r.table,attacker:r.attacker,defender:r.defender,
+ return {code:r.code,phase:r.phase,host:r.host,players:r.players.map(p=>({id:p.id,name:p.name,count:p.hand.length,me:p.id===pid,defender:p.id===r.defender,attacker:p.id===r.attacker,passed:r.passed.has(p.id),finished:r.finishOrder.includes(p.id),place:r.finishOrder.indexOf(p.id)+1,connected:p.connected!==false})),
+ hand:me?me.hand:[],trump:r.trump,trumpAvailable:r.trumpAvailable,deck:r.deck.length,table:r.table,attacker:r.attacker,defender:r.defender,finishOrder:r.finishOrder,
  took:r.took,round:r.round,message:r.message,winner:r.winner,canAttack:r.phase==="play"&&pid===r.attacker&&r.table.length===0,
  canDefend:r.phase==="play"&&pid===r.defender&&r.table.some(x=>!x.cover),
- canContribute:r.phase==="play"&&pid!==r.defender&&r.table.length>0,
- canPass:r.phase==="play"&&pid!==r.defender&&r.table.length>0&&(r.table.every(x=>x.cover)||r.took)};
+ canContribute:r.phase==="play"&&pid!==r.defender&&!r.finishOrder.includes(pid)&&r.table.length>0,
+ canPass:r.phase==="play"&&pid!==r.defender&&!r.finishOrder.includes(pid)&&r.table.length>0&&(r.table.every(x=>x.cover)||r.took)};
 }
 function emit(r){for(const p of r.players)io.to(p.id).emit("state",state(r,p.id));}
 function say(r,m){r.message=m;emit(r);}
@@ -28,9 +28,26 @@ function tableRanks(r){return new Set(r.table.flatMap(t=>[t.card.rank,...(t.cove
 function allCovered(r){return r.table.length>0&&r.table.every(t=>!!t.cover);}
 function othersPassed(r){return r.players.filter(p=>p.id!==r.defender).every(p=>r.passed.has(p.id));}
 function drawRound(r){
+ // Rút theo thứ tự bắt đầu từ người đánh đầu vòng.
  for(let i=0;i<r.players.length;i++){
   const p=r.players[(r.roundStartIndex+i)%r.players.length];
   while(p.hand.length<8&&r.deck.length)p.hand.push(r.deck.pop());
+  // Lá chưởng là lá cuối cùng được rút sau khi bộ bài úp đã hết.
+  if(p.hand.length<8&&r.deck.length===0&&r.trumpAvailable){
+   p.hand.push(r.trump);r.trumpAvailable=false;
+  }
+ }
+}
+function activePlayers(r){
+ return r.players.filter(p=>!r.finishOrder.includes(p.id));
+}
+function recordFinishedPlayers(r){
+ // Chỉ xếp hạng khi đã hết cả bài úp lẫn lá chưởng.
+ if(r.deck.length!==0||r.trumpAvailable)return;
+ for(const p of r.players){
+  if(p.hand.length===0&&!r.finishOrder.includes(p.id)){
+   r.finishOrder.push(p.id);
+  }
  }
 }
 function finishRound(r){
@@ -42,21 +59,45 @@ function finishRound(r){
  const oldDef=r.defender,oldDefIndex=r.players.findIndex(p=>p.id===oldDef);
  r.table=[];r.passed.clear();r.took=false;
  drawRound(r);
- if(r.deck.length===0&&r.players.filter(p=>p.hand.length>0).length<=1){
-  r.phase="finished";r.winner=r.players.find(p=>p.hand.length>0)?.name||"Không có";
-  r.message="Ván kết thúc. "+r.winner+" là người cuối cùng còn bài.";emit(r);return;
+ recordFinishedPlayers(r);
+ const active=activePlayers(r);
+ if(r.deck.length===0&&!r.trumpAvailable&&active.length<=1){
+  r.phase="finished";
+  const loser=active[0];
+  r.winner=r.finishOrder.map(pid=>get(r,pid)?.name).filter(Boolean);
+  r.message=loser
+   ?"Ván kết thúc. "+r.winner.join(" → ")+" → "+loser.name+" (thua cuộc)."
+   :"Ván kết thúc. Tất cả người chơi đã hết bài.";
+  emit(r);return;
  }
- const nextAttacker=failed?r.players[(oldDefIndex+1)%r.players.length]:defender;
+ // Người đã về được xếp hạng và không tham gia các vòng sau.
+ const preferredIndex=failed?(oldDefIndex+1)%r.players.length:r.players.findIndex(p=>p.id===defender?.id);
+ let nextAttacker=null;
+ for(let step=0;step<r.players.length;step++){
+  const p=r.players[(preferredIndex+step+r.players.length)%r.players.length];
+  if(!r.finishOrder.includes(p.id)){nextAttacker=p;break;}
+ }
+ if(!nextAttacker){r.phase="finished";emit(r);return;}
+ const remaining=activePlayers(r);
  r.attacker=nextAttacker.id;
- r.defender=r.players[(r.players.findIndex(p=>p.id===r.attacker)+1)%r.players.length].id;
- r.roundStartIndex=r.players.findIndex(p=>p.id===r.attacker);
+ const attackerIndex=r.players.findIndex(p=>p.id===r.attacker);
+ let nextDefender=null;
+ for(let step=1;step<=r.players.length;step++){
+  const p=r.players[(attackerIndex+step)%r.players.length];
+  if(!r.finishOrder.includes(p.id)){nextDefender=p;break;}
+ }
+ if(!nextDefender){
+  r.phase="finished";r.message="Ván kết thúc.";emit(r);return;
+ }
+ r.defender=nextDefender.id;
+ r.roundStartIndex=attackerIndex;
  r.round++;r.message+=" Lượt mới: "+nextAttacker.name+" đánh trước.";emit(r);
 }
 function maybeFinish(r){if((allCovered(r)||r.took)&&othersPassed(r))finishRound(r);else emit(r);}
 function roomFor(s){return rooms.get(s.data.room);}
 io.on("connection",s=>{
  s.on("createRoom",({name})=>{
-  let code=id().slice(0,5),r={code,host:s.id,players:[{id:s.id,name:(name||"Người chơi").trim().slice(0,18)||"Người chơi",hand:[]}],phase:"lobby",deck:[],trump:null,table:[],attacker:null,defender:null,passed:new Set(),took:false,round:1,roundStartIndex:0,message:"Chờ người chơi tham gia.",winner:null};
+  let code=id().slice(0,5),r={code,host:s.id,players:[{id:s.id,name:(name||"Người chơi").trim().slice(0,18)||"Người chơi",hand:[]}],phase:"lobby",deck:[],trump:null,trumpAvailable:true,finishOrder:[],table:[],attacker:null,defender:null,passed:new Set(),took:false,round:1,roundStartIndex:0,message:"Chờ người chơi tham gia.",winner:null};
   rooms.set(code,r);s.data.room=code;s.join(code);s.emit("joined",code);emit(r);
  });
  s.on("joinRoom",({name,code})=>{
@@ -71,7 +112,7 @@ io.on("connection",s=>{
   // Lá chưởng phải có số nhỏ hơn 10 (2 đến 9).
   const eligible=deck.map((c,i)=>({c,i})).filter(x=>RANKS.indexOf(x.c.rank)>=0&&RANKS.indexOf(x.c.rank)<=7);
   const chosen=eligible[Math.floor(Math.random()*eligible.length)];
-  r.trump=deck.splice(chosen.i,1)[0];r.deck=deck;
+  r.trump=deck.splice(chosen.i,1)[0];r.trumpAvailable=true;r.finishOrder=[];r.deck=deck;
   r.players.forEach(p=>p.hand=r.deck.splice(0,8));
   r.phase="play";r.round=1;r.roundStartIndex=0;r.attacker=r.players[0].id;r.defender=r.players[1].id;
   r.table=[];r.passed.clear();r.took=false;r.message="Ván bắt đầu. "+r.players[0].name+" là người tấn đầu tiên.";emit(r);
@@ -102,6 +143,7 @@ io.on("connection",s=>{
  s.on("contribute",({ids})=>{
   const r=roomFor(s);if(!r||r.phase!=="play")return;
   if(s.id===r.defender)return error(s,"Người bị tấn không được góp bài cho chính mình.");
+  if(r.finishOrder.includes(s.id))return error(s,"Bạn đã về và không còn tham gia vòng mới.");
   if(!r.table.length)return error(s,"Chưa có bài trên bàn để góp.");
   const p=get(r,s.id),a=cardsOf(p,ids),allowed=tableRanks(r);
   if(!a||a.length>4||!a.every(c=>allowed.has(c.rank)))return error(s,"Chỉ góp lá có số đang xuất hiện trên bàn.");
@@ -112,6 +154,7 @@ io.on("connection",s=>{
  s.on("pass",()=>{
   const r=roomFor(s);if(!r||r.phase!=="play")return;
   if(s.id===r.defender)return error(s,"Người bị tấn không bấm kết thúc lượt góp.");
+  if(r.finishOrder.includes(s.id))return error(s,"Bạn đã về và không còn tham gia vòng mới.");
   if(!r.table.length)return error(s,"Chưa có lượt tấn để kết thúc.");
   if(!allCovered(r)&&!r.took)return error(s,"Người bị tấn chưa đỡ hết bài hoặc chọn ôm bài.");
   r.passed.add(s.id);r.message=get(r,s.id).name+" kết thúc lượt góp.";maybeFinish(r);
